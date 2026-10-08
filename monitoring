@@ -1,0 +1,43 @@
+#!/bin/bash
+
+PLAYBOOK="$(dirname "$0")/install_cockpit.yml"
+
+echo "================================="
+echo "  Cockpit monitoring setup"
+echo "================================="
+echo
+
+# Kontrollime, kas Ansible on olemas
+if ! command -v ansible-playbook >/dev/null 2>&1; then
+    echo "VIGA: Ansible ei ole paigaldatud."
+    exit 1
+fi
+
+# Käivitame playbooki
+sudo -n ansible-playbook "$PLAYBOOK"
+
+if [ $? -ne 0 ]; then
+    echo
+    echo "VIGA: Cockpiti paigaldamine ebaõnnestus."
+    echo "Kontrolli, et kasutajal oleks paroolita sudo õigus."
+    exit 1
+fi
+
+# Leiame serveri IP-aadressi
+IP=$(hostname -I | awk '{print $1}')
+
+echo
+echo "================================="
+echo "  PAIGALDUS EDUKAS"
+echo "================================="
+echo
+echo "Cockpit töötab."
+echo
+echo "Ava brauseris:"
+echo "https://$IP:9090"
+echo
+echo "Logi sisse selle serveri kasutajanime ja parooliga."
+echo
+echo "Teenuse olek:"
+systemctl is-active cockpit.socket
+echo

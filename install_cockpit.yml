@@ -1,0 +1,21 @@
+---
+- name: Install Cockpit monitoring
+  hosts: localhost
+  connection: local
+  become: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install Cockpit
+      ansible.builtin.apt:
+        name: cockpit
+        state: present
+
+    - name: Enable and start Cockpit
+      ansible.builtin.systemd:
+        name: cockpit.socket
+        enabled: true
+        state: started
