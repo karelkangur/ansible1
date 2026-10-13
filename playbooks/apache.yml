@@ -1,0 +1,124 @@
+---
+- name: Paigalda veebiserver klientidesse
+  hosts: webservers
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Paigalda Apache Debianile
+      ansible.builtin.apt:
+        name: apache2
+        state: present
+        update_cache: true
+      when: ansible_facts["os_family"] == "Debian"
+
+    - name: Paigalda Apache CentOSile
+      ansible.builtin.dnf:
+        name: httpd
+        state: present
+      when: ansible_facts["os_family"] == "RedHat"
+
+    - name: Käivita ja luba Apache Debianil
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: true
+      when: ansible_facts["os_family"] == "Debian"
+
+    - name: Käivita ja luba Apache CentOSil
+      ansible.builtin.service:
+        name: httpd
+        state: started
+        enabled: true
+      when: ansible_facts["os_family"] == "RedHat"
+
+    - name: Loo karel kasutajale public_html kataloog
+      ansible.builtin.file:
+        path: /home/karel/public_html
+        state: directory
+        owner: karel
+        group: karel
+        mode: "0755"
+
+    - name: Luba userdir moodul Debianil
+      ansible.builtin.command:
+        cmd: a2enmod userdir
+      register: debian_userdir
+      changed_when: "'Enabling module userdir' in debian_userdir.stdout"
+      when: ansible_facts["os_family"] == "Debian"
+      notify: Taaskäivita Debian Apache
+    - name: Veendu, et userdir konfiguratsioon on CentOSil olemas
+      ansible.builtin.file:
+        path: /etc/httpd/conf.d/userdir.conf
+        state: file
+      when: ansible_facts["os_family"] == "RedHat"
+
+    - name: Luba CentOSil kasutajate public_html kataloogid
+      ansible.builtin.replace:
+        path: /etc/httpd/conf.d/userdir.conf
+        regexp: '^\s*UserDir disabled\s*$'
+        replace: '    UserDir public_html'
+      when: ansible_facts["os_family"] == "RedHat"
+      notify: Taaskäivita CentOS Apache
+
+    - name: Loo karel kasutaja index.html
+      ansible.builtin.copy:
+        dest: /home/karel/public_html/index.html
+        owner: karel
+        group: karel
+        mode: "0644"
+        content: |
+          <html>
+          <head>
+            <title>Kareli leht</title>
+          </head>
+          <body>
+            <h1>Kareli lehekülg</h1>
+            <p>See leht on loodud Ansible playbookiga.</p>
+          </body>
+          </html>
+
+    - name: Luba Apachel läbida kareli kodukataloog
+      ansible.builtin.file:
+        path: /home/karel
+        owner: karel
+        group: karel
+        mode: "0711"
+
+    - name: Luba HTTP CentOSi tulemüüris
+      ansible.builtin.command:
+        cmd: firewall-cmd --permanent --add-service=http
+      register: firewall_http
+      changed_when: "'success' in firewall_http.stdout"
+      when: ansible_facts["os_family"] == "RedHat"
+
+    - name: Lae CentOSi tulemüüri reeglid uuesti
+      ansible.builtin.command:
+        cmd: firewall-cmd --reload
+      when:
+        - ansible_facts["os_family"] == "RedHat"
+        - firewall_http is changed
+
+    - name: Luba CentOS SELinuxil kasutajate veebikaustu lugeda
+      ansible.builtin.command:
+        cmd: setsebool -P httpd_enable_homedirs on
+      when: ansible_facts["os_family"] == "RedHat"
+
+    - name: Loo igale veebiserverile unikaalne vaikeleht
+      ansible.builtin.template:
+        src: ../templates/index.html.j2
+        dest: /var/www/html/index.html
+        owner: root
+        group: root
+        mode: "0644"
+
+  handlers:
+    - name: Taaskäivita CentOS Apache
+      ansible.builtin.service:
+        name: httpd
+        state: restarted
+
+    - name: Taaskäivita Debian Apache
+      ansible.builtin.service:
+        name: apache2
+        state: restarted
