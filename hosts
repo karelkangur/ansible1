@@ -1,5 +1,5 @@
 [webservers]
-klient1 ansible_host=192.168.45.200
+klient1 ansible_host=192.168.33.125
 klient2 ansible_host=192.168.45.14
 
 [all:vars]

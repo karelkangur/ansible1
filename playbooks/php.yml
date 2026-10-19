@@ -1,0 +1,51 @@
+---
+- name: Paigalda PHP veebiserveritesse
+  hosts: webservers
+  become: true
+  gather_facts: true
+
+  tasks:
+    # Debian 13: PHP + Apache PHP moodul
+    - name: Paigalda PHP Debianile
+      ansible.builtin.apt:
+        name:
+          - php
+          - libapache2-mod-php
+        state: present
+        update_cache: true
+      when: ansible_facts["os_family"] == "Debian"
+      notify: Taaskäivita Debian Apache
+
+    # CentOS Stream 9: PHP põhipakett
+    - name: Paigalda PHP CentOSile
+      ansible.builtin.dnf:
+        name:
+          - php
+          - php-cli
+        state: present
+      when: ansible_facts["os_family"] == "RedHat"
+      notify: Taaskäivita CentOS Apache
+
+    # PHP info testileht
+    - name: Loo PHP info testileht
+      ansible.builtin.copy:
+        dest: /var/www/html/info.php
+        content: |
+          <?php
+          phpinfo();
+          ?>
+        owner: root
+        group: root
+        mode: "0644"
+
+
+  handlers:
+    - name: Taaskäivita Debian Apache
+      ansible.builtin.service:
+        name: apache2
+        state: restarted
+
+    - name: Taaskäivita CentOS Apache
+      ansible.builtin.service:
+        name: httpd
+        state: restarted

@@ -1,0 +1,30 @@
+---
+# Moodle juhendis toodud vanad PHP 7 eemaldamise näited:
+# apt-get purge php7.*
+# apt-get purge php7.X-common
+# apt remove php7.X*
+
+- name: Eemalda PHP klientserveritest
+  hosts: webservers
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Eemalda PHP paketid Debianilt
+      ansible.builtin.apt:
+        name:
+          - php
+          - libapache2-mod-php
+        state: absent
+        purge: true
+        autoremove: true
+      when: ansible_facts["os_family"] == "Debian"
+
+    - name: Eemalda PHP paketid CentOSilt
+      ansible.builtin.dnf:
+        name:
+          - php
+          - php-cli
+        state: absent
+        autoremove: true
+      when: ansible_facts["os_family"] == "RedHat"
