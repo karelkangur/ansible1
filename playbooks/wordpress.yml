@@ -1,0 +1,164 @@
+---
+- name: Paigaldame WordPressi veebiserveritesse
+  hosts: webservers
+  become: true
+
+  vars_prompt:
+    # Lab 5 kasutab sama parooli wpuseri ja WordPressi admini jaoks.
+    - name: wp_password
+      prompt: Sisesta Lab 5 parool
+      private: true
+
+  vars:
+    wp_debian: "{{ ansible_facts['os_family'] == 'Debian' }}"
+    wp_packages: "{{ ['apache2', 'libapache2-mod-php', 'php-cli', 'php-mysql'] if wp_debian else ['httpd', 'php-fpm', 'php-cli', 'php-mysqlnd'] }}"
+    wp_apache: "{{ 'apache2' if wp_debian else 'httpd' }}"
+    wp_web_group: "{{ 'www-data' if wp_debian else 'apache' }}"
+    wp_socket: "{{ '/run/mysqld/mysqld.sock' if wp_debian else '/var/lib/mysql/mysql.sock' }}"
+    wp_version: '7.1.4'
+    wp_archive: "/root/allalaadimised/wordpress-{{ wp_version }}.tar.gz"
+    wp_dir: /var/www/html/wordpress
+    wp_url: "http://{{ ansible_facts['default_ipv4']['address'] }}/wordpress"
+    wp_db: wpdatabase
+    wp_db_user: wpuser
+
+  tasks:
+    # Paigaldame mysqli laienduse veebile ja PHP CLI käsurea jaoks.
+    - name: Paigaldame Apache ja vajalikud PHP paketid
+      ansible.builtin.package:
+        name: "{{ wp_packages }}"
+        state: present
+      notify: Uuenda veebiteenused
+
+    - name: Käivitame ja lubame veebiteenused
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: "{{ [wp_apache] if wp_debian else ['php-fpm', wp_apache] }}"
+      when: not ansible_check_mode
+
+    # Lab 4 paigaldas PyMySQL-i ja salvestas root'i ühendusandmed.
+    - name: Loome andmebaasi wpdatabase
+      ansible.mysql.mysql_db:
+        name: "{{ wp_db }}"
+        encoding: utf8mb4
+        state: present
+        config_file: /root/.my.cnf
+        login_unix_socket: "{{ wp_socket }}"
+
+    - name: Loome kohaliku WordPressi andmebaasikasutaja
+      ansible.mysql.mysql_user:
+        name: "{{ wp_db_user }}"
+        host: localhost
+        state: present
+        priv: "{{ wp_db }}.*:ALL"
+        plugin: caching_sha2_password
+        plugin_auth_string: "{{ wp_password }}"
+        # Räsi kasutamine lubab labori parooli serveri üldist poliitikat muutmata.
+        salt: "{{ ((inventory_hostname ~ ':wordpress') | hash('sha256'))[:20] }}"
+        config_file: /root/.my.cnf
+        login_unix_socket: "{{ wp_socket }}"
+      no_log: true
+
+    # Simuleeritud allalaadimine ei tekita arhiivi, mida lahti pakkida.
+    - name: Paigaldame ja seadistame WordPressi failid
+      when: not ansible_check_mode
+      block:
+        - name: Laeme alla WordPressi
+          ansible.builtin.get_url:
+            url: "https://wordpress.org/wordpress-{{ wp_version }}.tar.gz"
+            dest: "{{ wp_archive }}"
+            checksum: "sha1:https://wordpress.org/wordpress-{{ wp_version }}.tar.gz.sha1"
+            mode: '0600'
+
+        - name: Pakkime WordPressi lahti
+          ansible.builtin.unarchive:
+            src: "{{ wp_archive }}"
+            dest: /var/www/html
+            remote_src: true
+            creates: "{{ wp_dir }}/wp-settings.php"
+            owner: root
+            group: root
+
+        - name: Kopeerime WordPressi näidisseadistuse
+          ansible.builtin.copy:
+            src: "{{ wp_dir }}/wp-config-sample.php"
+            dest: "{{ wp_dir }}/wp-config.php"
+            remote_src: true
+            force: false
+            owner: root
+            group: "{{ wp_web_group }}"
+            mode: '0640'
+
+        # Sama kohalikku MySQL-i soklit kasutavad PHP ja Ansible.
+        - name: Määrame WordPressi andmebaasi ühenduse
+          ansible.builtin.lineinfile:
+            path: "{{ wp_dir }}/wp-config.php"
+            regexp: "^define\\(\\s*['\"]{{ item.key }}['\"]\\s*,"
+            line: >-
+              define( '{{ item.key }}', '{{ item.value | replace("\\", "\\\\") | replace("'", "\\'") }}' );
+            owner: root
+            group: "{{ wp_web_group }}"
+            mode: '0640'
+            validate: 'php -l %s'
+          loop:
+            - { key: DB_NAME, value: "{{ wp_db }}" }
+            - { key: DB_USER, value: "{{ wp_db_user }}" }
+            - { key: DB_PASSWORD, value: "{{ wp_password }}" }
+            - { key: DB_HOST, value: "localhost:{{ wp_socket }}" }
+          no_log: true
+
+    # Kuvatõmmise jaoks käivita esmalt valikuga --skip-tags lopeta.
+    - name: Lõpetame WordPressi paigalduse WP-CLI-ga
+      tags: [lopeta]
+      when: not ansible_check_mode
+      block:
+        - name: Laeme alla WP-CLI
+          ansible.builtin.get_url:
+            url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+            dest: /usr/local/bin/wp
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Kontrollime, kas WordPress on juba paigaldatud
+          ansible.builtin.command:
+            argv: [/usr/local/bin/wp, core, is-installed, --allow-root]
+            chdir: "{{ wp_dir }}"
+          register: wp_installed
+          changed_when: false
+          failed_when: wp_installed.rc not in [0, 1] or 'Error:' in wp_installed.stderr
+
+        - name: Loome saidi ja administraatori
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/wp
+              - core
+              - install
+              - "--url={{ wp_url }}"
+              - "--title=admin wordpressi sait"
+              - "--admin_user=admin"
+              - "--admin_email=admin@example.test"
+              - "--prompt=admin_password"
+              - --skip-email
+              - --allow-root
+            chdir: "{{ wp_dir }}"
+            stdin: "{{ wp_password }}"
+          when: wp_installed.rc == 1
+          no_log: true
+
+  handlers:
+    - name: Taaskäivitame CentOS-i PHP-FPM teenuse
+      ansible.builtin.service:
+        name: php-fpm
+        state: restarted
+      when: not wp_debian and not ansible_check_mode
+      listen: Uuenda veebiteenused
+
+    - name: Taaskäivitame Apache teenuse
+      ansible.builtin.service:
+        name: "{{ wp_apache }}"
+        state: restarted
+      when: not ansible_check_mode
+      listen: Uuenda veebiteenused
