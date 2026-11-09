@@ -1,0 +1,144 @@
+---
+- name: MySQL 8.4 serveri paigaldamine
+  hosts: webservers
+  become: true
+
+  vars:
+    deb_file: mysql-apt-config_0.8.40-1_all.deb
+    rpm_file: mysql84-community-release-el9-4.noarch.rpm
+
+  tasks:
+    # Hoidla seadistuspaketid salvestame kliendi root-kataloogi.
+    - name: Loome allalaadimiste kataloogi
+      ansible.builtin.file:
+        path: /root/allalaadimised
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    # Värskel kliendil ei teki --check ajal päris hoidlat ega pakette.
+    - name: Selgitame kontrollrežiimi ulatust
+      ansible.builtin.debug:
+        msg: Kontrollrežiimis kontrollime kataloogi. Hoidla ja serveri paigaldus tehakse päris käivitusel.
+      when: ansible_check_mode
+
+    - name: MySQL paigaldamine Debianile
+      when:
+        - ansible_facts["os_family"] == "Debian"
+        - not ansible_check_mode
+      block:
+        - name: Paigalda gnupg ja paigalduse sõltuvused
+          ansible.builtin.apt:
+            name:
+              - gnupg
+              - wget
+              - debconf-utils
+              - python3-debian
+              - python3-pymysql
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+
+        # Katkenud allalaadimine ei jäta sihtnimega poolikut paketti.
+        - name: Laadime MySQL APT paketi wget abil
+          ansible.builtin.shell: |
+            set -eu
+            pkg="/root/allalaadimised/{{ deb_file }}"
+            md5="981ff0a16aab27a0cd97f4c4ee49e9fd"
+            if printf '%s  %s\n' "$md5" "$pkg" | md5sum --check --status; then
+              exit 0
+            fi
+            tmp="$(mktemp "$pkg.XXXXXX")"
+            trap 'rm -f "$tmp"' EXIT
+            wget -q -O "$tmp" "https://repo.mysql.com/apt/debian/pool/mysql-apt-config/m/mysql-apt-config/{{ deb_file }}"
+            printf '%s  %s\n' "$md5" "$tmp" | md5sum --check
+            mv "$tmp" "$pkg"
+          register: apt_download
+          changed_when: apt_download.stdout != ""
+
+        # Valime 8.4 haru enne hoidla konfiguratsiooni paigaldamist.
+        - name: Valime MySQL 8.4 LTS
+          ansible.builtin.debconf:
+            name: mysql-apt-config
+            question: mysql-apt-config/select-server
+            value: mysql-8.4-lts
+            vtype: select
+
+        - name: Installeerime MySQL repositooriumi
+          ansible.builtin.apt:
+            deb: "/root/allalaadimised/{{ deb_file }}"
+            state: present
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+
+        - name: Teeme APT-le update
+          ansible.builtin.apt:
+            update_cache: true
+
+        # Paketiversiooni filter hoiab paigalduse 8.4 harus.
+        - name: Paigaldame mysql-server
+          ansible.builtin.apt:
+            name: "mysql-server=8.4.*"
+            state: present
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+
+    - name: MySQL paigaldamine CentOS Stream 9-le
+      when:
+        - ansible_facts["os_family"] == "RedHat"
+        - not ansible_check_mode
+      block:
+        - name: Laadime MySQL RPM repositooriumi alla
+          ansible.builtin.get_url:
+            url: "https://repo.mysql.com/{{ rpm_file }}"
+            dest: "/root/allalaadimised/{{ rpm_file }}"
+            checksum: "md5:7826e7d819163f2d0e42f70cfec059f9"
+            mode: '0600'
+
+        # Impordime Oracle'i võtme enne allkirjastatud RPM-i paigaldamist.
+        - name: Lisame MySQL RPM allkirjavõtme
+          ansible.builtin.rpm_key:
+            key: https://repo.mysql.com/RPM-GPG-KEY-mysql-2025
+            fingerprint: BCA43417C3B485DD128EC6D4B7B3B788A8D3785C
+            state: present
+
+        - name: Paigaldame RPM repositooriumi ja DNF tööriistad
+          ansible.builtin.dnf:
+            name:
+              - "/root/allalaadimised/{{ rpm_file }}"
+              - dnf-plugins-core
+            state: present
+
+        - name: Kontrollime aktiivseid DNF hoidlaid
+          ansible.builtin.command: dnf -q repolist --enabled
+          register: mysql_repos
+          changed_when: false
+
+        # Kontrollitud RPM lubab algseadistuses 9.7 hoidlad.
+        - name: Valime MySQL 8.4 hoidlad
+          ansible.builtin.shell: |
+            set -e
+            dnf config-manager --disable mysql-9.7-lts-community mysql-tools-9.7-lts-community
+            dnf config-manager --enable mysql-8.4-lts-community mysql-tools-8.4-lts-community
+          when: >-
+            'mysql-8.4-lts-community' not in mysql_repos.stdout or
+            'mysql-tools-8.4-lts-community' not in mysql_repos.stdout or
+            'mysql-9.7-lts-community' in mysql_repos.stdout or
+            'mysql-tools-9.7-lts-community' in mysql_repos.stdout
+
+        - name: Paigaldame MySQL serveri ja PyMySQL-i
+          ansible.builtin.dnf:
+            name:
+              - mysql-community-server
+              - python3-PyMySQL
+            state: present
+            update_cache: true
+
+    # Teenuse nimi sõltub kliendi paketihaldurist.
+    - name: Käivitame MySQL teenuse
+      ansible.builtin.service:
+        name: "{{ 'mysql' if ansible_facts['os_family'] == 'Debian' else 'mysqld' }}"
+        state: started
+        enabled: true
+      when: not ansible_check_mode

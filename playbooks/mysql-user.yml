@@ -1,0 +1,152 @@
+---
+- name: MySQL root-kasutaja seadistamine
+  hosts: webservers
+  become: true
+
+  vars_prompt:
+    # Sisesta labori nõutud parool. Väärtus jääb Gitist ja logist välja.
+    - name: mysql_root_password
+      prompt: Sisesta Lab 4 MySQL root-parool
+      private: true
+
+  vars:
+    mysql_socket: "{{ '/run/mysqld/mysqld.sock' if ansible_facts['os_family'] == 'Debian' else '/var/lib/mysql/mysql.sock' }}"
+    mysql_root_cli:
+      - mysql
+      - --no-defaults
+      - --no-login-paths
+      - --protocol=SOCKET
+      - "--socket={{ mysql_socket }}"
+      - --user=root
+      - --batch
+      - --skip-column-names
+    mysql_auth_query: "SELECT plugin FROM mysql.user WHERE user='root' AND host='localhost';"
+
+  tasks:
+    # --check kinnitab eeltingimuse ka värskelt paigaldatud serveril.
+    - name: Kontrollime MySQL sokli olemasolu
+      ansible.builtin.stat:
+        path: "{{ mysql_socket }}"
+      register: mysql_socket_status
+
+    - name: Veendume, et MySQL teenus on käivitatud
+      ansible.builtin.assert:
+        that: mysql_socket_status.stat.issock | default(false)
+        fail_msg: MySQL sokkel puudub. Käivita esmalt mysql-server.yml.
+
+    - name: Seadistame ja kontrollime root-autentimist
+      when: not ansible_check_mode
+      block:
+        - name: Kontrollime, kas soovitud parool juba töötab
+          ansible.builtin.command:
+            argv: "{{ mysql_root_cli + ['--execute', mysql_auth_query] }}"
+          environment:
+            MYSQL_PWD: "{{ mysql_root_password }}"
+          register: mysql_current_auth
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        # RPM paigalduse esmane root-parool on aegunud. Loeme selle logist
+        # ja tuletame vaheparooli, mida saab pärast katkestust uuesti arvutada.
+        - name: Valmistame ette CentOS-i esmase autentimise
+          when:
+            - ansible_facts["os_family"] == "RedHat"
+            - mysql_current_auth.rc != 0
+          block:
+            - name: Loeme MySQL ajutise parooli
+              ansible.builtin.command:
+                argv:
+                  - awk
+                  - '/temporary password.*root@localhost/ {password=$NF} END {if (!length(password)) exit 1; print password}'
+                  - /var/log/mysqld.log
+              register: mysql_temporary_password
+              changed_when: false
+              no_log: true
+
+            - name: Tuletame tugeva vaheparooli
+              ansible.builtin.set_fact:
+                mysql_bootstrap_password: "Aa1!{{ (mysql_temporary_password.stdout | hash('sha256'))[:32] }}"
+              no_log: true
+
+            - name: Kontrollime vaheparooli korduskäivituse jaoks
+              ansible.builtin.command:
+                argv: "{{ mysql_root_cli + ['--execute', 'SELECT 1;'] }}"
+              environment:
+                MYSQL_PWD: "{{ mysql_bootstrap_password }}"
+              register: mysql_bootstrap_probe
+              changed_when: false
+              failed_when: false
+              no_log: true
+
+            - name: Vahetame aegunud parooli tugeva vaheparooli vastu
+              ansible.builtin.command:
+                argv: "{{ mysql_root_cli + ['--connect-expired-password'] }}"
+                stdin: "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_bootstrap_password }}';"
+              environment:
+                MYSQL_PWD: "{{ mysql_temporary_password.stdout }}"
+              when: mysql_bootstrap_probe.rc != 0
+              no_log: true
+
+        # Debian lubab algul root-kasutaja sisse Unix-sokli kaudu. Salt
+        # laseb moodulil arvutada räsi ilma CentOS-i globaalset poliitikat muutmata.
+        # Jätame olemasoleva root-konto õigused alles.
+        - name: Määrame root-kontole parooli ja paroolipõhise autentimise
+          ansible.mysql.mysql_user:
+            name: root
+            host: localhost
+            state: present
+            plugin: caching_sha2_password
+            plugin_auth_string: "{{ mysql_root_password }}"
+            salt: "{{ (inventory_hostname | hash('sha256'))[:20] }}"
+            update_password: always
+            login_user: root
+            login_password: "{{ mysql_bootstrap_password | default('') }}"
+            login_unix_socket: "{{ mysql_socket }}"
+            config_file: ''
+          when: mysql_current_auth.rc != 0 or mysql_current_auth.stdout != 'caching_sha2_password'
+          no_log: true
+
+        - name: Kontrollime parooliga sisselogimist
+          ansible.builtin.command:
+            argv: "{{ mysql_root_cli + ['--execute', 'SELECT CURRENT_USER(), VERSION();'] }}"
+          environment:
+            MYSQL_PWD: "{{ mysql_root_password }}"
+          changed_when: false
+          no_log: true
+
+        - name: Kontrollime, et paroolita sisselogimine keelatakse
+          ansible.builtin.command:
+            argv: "{{ mysql_root_cli + ['--skip-password', '--execute', 'SELECT 1;'] }}"
+          environment:
+            MYSQL_PWD: ''
+          register: mysql_no_password
+          changed_when: false
+          failed_when: mysql_no_password.rc == 0 or 'ERROR 1045' not in mysql_no_password.stderr
+
+        # Faili saab lugeda ainult süsteemi root-kasutaja.
+        - name: Loome root ühendusseadete faili
+          ansible.builtin.copy:
+            dest: /root/.my.cnf
+            owner: root
+            group: root
+            mode: '0600'
+            content: |
+              [client]
+              user=root
+              password={{ mysql_root_password | to_json(ensure_ascii=false) }}
+          no_log: true
+
+        - name: Kontrollime ühendust root seadete failiga
+          ansible.builtin.command:
+            argv:
+              - mysql
+              - --defaults-file=/root/.my.cnf
+              - --no-login-paths
+              - --protocol=SOCKET
+              - "--socket={{ mysql_socket }}"
+              - --execute
+              - SELECT CURRENT_USER(), VERSION();
+          environment:
+            MYSQL_PWD: ''
+          changed_when: false
