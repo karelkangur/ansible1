@@ -1,0 +1,11 @@
+<?php
+// Debian loob sessioonivõtme paketi paigaldamisel.
+require '/var/lib/phpmyadmin/blowfish_secret.inc.php';
+
+$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
+$cfg['ServerDefault'] = 1;
+
+$cfg['Servers'][1]['auth_type'] = 'cookie';
+$cfg['Servers'][1]['host'] = 'localhost';
+$cfg['Servers'][1]['socket'] = '/run/mysqld/mysqld.sock';
+$cfg['Servers'][1]['AllowNoPassword'] = false;

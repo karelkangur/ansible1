@@ -1,0 +1,81 @@
+---
+- name: Paigaldame ja seadistame phpMyAdmini
+  hosts: webservers
+  become: true
+
+  tasks:
+    # Lab 6 kasutab Debiani APT paketti.
+    - name: Seadistame phpMyAdmini Debiani kliendil
+      when: ansible_facts['os_family'] == 'Debian'
+      block:
+        - name: Uuendame pakettide nimekirja
+          ansible.builtin.apt:
+            update_cache: true
+            cache_valid_time: 3600
+
+        # Kasutame Lab 4 MySQL-i ja olemasolevaid kontosid.
+        - name: Vastame paketi paigaldusküsimustele ette
+          ansible.builtin.debconf:
+            name: phpmyadmin
+            question: "{{ item.question }}"
+            value: "{{ item.value }}"
+            vtype: "{{ item.type }}"
+          loop:
+            - { question: phpmyadmin/reconfigure-webserver, value: apache2, type: multiselect }
+            - { question: phpmyadmin/dbconfig-install, value: 'false', type: boolean }
+
+        - name: Paigaldame phpMyAdmin paketi
+          ansible.builtin.apt:
+            name: phpmyadmin
+            state: present
+            policy_rc_d: 101
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          notify: Rakendame Apache seadistuse
+
+        # Esimesel --check käivitusel ei teki paketi katalooge ega võtmefaili.
+        - name: Seadistame paigaldatud rakenduse
+          when: not ansible_check_mode
+          block:
+            - name: Tagame phpMyAdmini sümboolse lingi Apache veebikataloogis
+              ansible.builtin.file:
+                src: /usr/share/phpmyadmin
+                path: /var/www/html/phpmyadmin
+                state: link
+              notify: Rakendame Apache seadistuse
+
+            - name: Paigaldame phpMyAdmini seadistuse mallist
+              ansible.builtin.template:
+                src: ../templates/config.inc.php.j2
+                dest: /etc/phpmyadmin/config.inc.php
+                owner: root
+                group: www-data
+                mode: '0640'
+                validate: 'php -l %s'
+              notify: Rakendame Apache seadistuse
+
+            # Kontrollime veebivaadet pärast handlerite käivitamist.
+            - name: Rakendame muudatused enne HTTP kontrolli
+              ansible.builtin.meta: flush_handlers
+
+            - name: Veendume, et phpMyAdmini sisselogimisvorm avaneb
+              ansible.builtin.uri:
+                url: "http://{{ ansible_facts['default_ipv4']['address'] }}/phpmyadmin/"
+                return_content: true
+                use_proxy: false
+              register: phpmyadmin_http
+              failed_when: >-
+                phpmyadmin_http.status | default(0) != 200 or
+                'pma_username' not in (phpmyadmin_http.content | default(''))
+
+  handlers:
+    - name: Kontrollime Apache konfiguratsiooni
+      ansible.builtin.command: apache2ctl configtest
+      changed_when: false
+      listen: Rakendame Apache seadistuse
+
+    - name: Taaskäivitame Apache teenuse
+      ansible.builtin.service:
+        name: apache2
+        state: restarted
+      listen: Rakendame Apache seadistuse
